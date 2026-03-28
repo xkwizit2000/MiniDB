@@ -1,6 +1,9 @@
 # minidb
-Minimal in-memory database with SQL-like queries. Zero dependencies.
+
+Zero-dependency Python implementation.
+
 ## Usage
+
 ```bash
 python3 minidb.py
 ```
