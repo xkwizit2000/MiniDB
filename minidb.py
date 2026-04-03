@@ -29,6 +29,8 @@
 import json, os, time, tempfile
 from contextlib import contextmanager
 
+__version__ = "0.2.0"
+
 _MISSING = object()  # sentinel to distinguish missing keys from stored None
 
 try:
