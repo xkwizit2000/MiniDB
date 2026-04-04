@@ -1,9 +1,7 @@
 # minidb
-
-Zero-dependency Python implementation.
-
+#!/usr/bin/env python3
 ## Usage
-
 ```bash
-python3 minidb.py
+python3 minidb.py --help
 ```
+Single-file Python, zero dependencies.
