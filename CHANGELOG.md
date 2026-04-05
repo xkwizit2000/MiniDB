@@ -7,6 +7,29 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.0] - 2026-04-05
+
+Inspired by the `select()`, `update()`, and `order_by` conventions from [rogue-agent1/minidb-engine](https://github.com/rogue-agent1/minidb-engine), with schema validation done properly.
+
+### Added
+- `query(prefix, where, columns, order_by, limit, skip_invalid)` - SQL-like queries over key namespaces
+  - `where=lambda v: ...` - predicate filtering on value dicts
+  - `order_by='field'` / `order_by='-field'` - ascending/descending sort (Django convention)
+  - `columns=['a', 'b']` - field projection; `_key` always included in results
+  - `limit=N` - cap results after sort
+  - `skip_invalid=True` - silently skip non-dict values; raises `TypeError` by default
+  - Works inside transactions, respects TTL expiry
+- `update_where(prefix, where, updates)` - predicate-based bulk update with single disk write
+  - `where=None` matches all keys under prefix
+  - Raises `ValueError` on empty updates, `TypeError` on non-dict values
+  - Full transaction and rollback support
+- `delete_where(prefix, where)` - predicate-based bulk delete with single disk write
+  - `where=None` deletes all keys under prefix
+  - Full transaction and rollback support
+- 30 new tests covering all query combinations, update/delete predicates, transaction participation, rollback, and error handling
+
+---
+
 ## [0.4.0] - 2026-04-05
 
 ### Added

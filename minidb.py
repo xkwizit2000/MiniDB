@@ -29,7 +29,7 @@
 import json, os, time, tempfile, threading, atexit
 from contextlib import contextmanager
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 _MISSING = object()  # sentinel to distinguish missing keys from stored None
 
@@ -83,7 +83,7 @@ class MiniDB:
         self._timer.start()
 
     def _timer_flush(self):
-        """Called by the timer thread — flush if dirty, then reschedule."""
+        """Called by the timer thread - flush if dirty, then reschedule."""
         self.flush()
         if self._flush_interval is not None:
             self._schedule_timer()
@@ -190,7 +190,7 @@ class MiniDB:
                 self.data = json.load(f)
 
     def _save(self):
-        # Inside a transaction, suppress writes — commit() flushes once at the end
+        # Inside a transaction, suppress writes - commit() flushes once at the end
         if self._in_transaction:
             return
         # In buffering mode, mark dirty instead of writing immediately
@@ -204,7 +204,7 @@ class MiniDB:
         os.replace(tmp_path, self.path)
 
     def _flush(self):
-        """Unconditional write to disk — used by transactions and buffer flushes."""
+        """Unconditional write to disk - used by transactions and buffer flushes."""
         dir_name = os.path.dirname(self.path) or "."
         with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, suffix=".tmp") as tmp:
             json.dump(self.data, tmp)
@@ -212,7 +212,7 @@ class MiniDB:
         os.replace(tmp_path, self.path)
 
     def _reload(self):
-        # Inside a transaction, don't reload from disk — work against the snapshot
+        # Inside a transaction, don't reload from disk - work against the snapshot
         if self._in_transaction:
             return
         if os.path.exists(self.path):
@@ -224,7 +224,7 @@ class MiniDB:
         """
         Atomic transaction block. All writes are held in memory and flushed
         in a single _save() on success. Any exception triggers a full rollback
-        to the pre-transaction state — nothing is written to disk.
+        to the pre-transaction state - nothing is written to disk.
 
         Usage:
             with db.transaction():
@@ -245,10 +245,10 @@ class MiniDB:
             self._in_transaction = True
             try:
                 yield
-                # Success — flush all buffered changes in one write
+                # Success - flush all buffered changes in one write
                 self._flush()
             except Exception:
-                # Rollback — restore pre-transaction state, nothing written to disk
+                # Rollback - restore pre-transaction state, nothing written to disk
                 self.data = self._tx_snapshot
                 raise
             finally:
@@ -408,6 +408,184 @@ class MiniDB:
             return {k: v["v"] for k, v in self.data.items()
                     if k.startswith(prefix)
                     and (v.get("exp") is None or now <= v["exp"])}
+
+    def _query_rows(self, prefix, where, columns, order_by, limit, skip_invalid, now):
+        """
+        Core query logic shared between transaction and non-transaction paths.
+        Returns a list of result dicts, each with a '_key' field added.
+        """
+        rows = []
+        for k, entry in self.data.items():
+            if not k.startswith(prefix):
+                continue
+            if entry.get("exp") is not None and now > entry["exp"]:
+                continue
+            v = entry["v"]
+            if not isinstance(v, dict):
+                if skip_invalid:
+                    continue
+                raise TypeError(
+                    f"query() requires dict values - key '{k}' has type "
+                    f"{type(v).__name__}. Use skip_invalid=True to skip non-dict values."
+                )
+            if where is not None and not where(v):
+                continue
+            row = {"_key": k, **v}
+            rows.append(row)
+
+        if order_by is not None:
+            reverse = order_by.startswith("-")
+            field = order_by[1:] if reverse else order_by
+            rows.sort(key=lambda r: r.get(field, ""), reverse=reverse)
+
+        if limit is not None:
+            rows = rows[:limit]
+
+        if columns is not None:
+            rows = [{"_key": r["_key"], **{c: r.get(c) for c in columns}} for r in rows]
+
+        return rows
+
+    def query(self, prefix="", where=None, columns=None, order_by=None,
+              limit=None, skip_invalid=False):
+        """
+        SQL-like query over keys sharing a prefix.
+
+        Args:
+            prefix:       Key prefix to filter on (e.g. "user:").
+            where:        Callable predicate applied to each value dict.
+                          e.g. where=lambda v: v['age'] > 25
+            columns:      List of fields to include in results. None returns all fields.
+                          '_key' is always included.
+            order_by:     Field name to sort by. Prefix with '-' for descending.
+                          e.g. order_by='-age'
+            limit:        Maximum number of results to return.
+            skip_invalid: If True, silently skip non-dict values instead of raising.
+
+        Returns:
+            List of dicts. Each dict includes '_key' plus requested fields.
+
+        Raises:
+            TypeError: If a value is not a dict and skip_invalid is False.
+
+        Example:
+            db.query("user:",
+                where=lambda v: v['city'] == 'NYC',
+                columns=['name', 'age'],
+                order_by='-age',
+                limit=5)
+        """
+        now = time.time()
+        if self._in_transaction:
+            return self._query_rows(prefix, where, columns, order_by, limit, skip_invalid, now)
+        with self._lock():
+            self._reload()
+            return self._query_rows(prefix, where, columns, order_by, limit, skip_invalid, now)
+
+    def update_where(self, prefix="", where=None, updates=None):
+        """
+        Bulk update all keys under prefix matching a predicate.
+
+        Args:
+            prefix:  Key prefix to filter on.
+            where:   Callable predicate applied to each value dict.
+                     None matches all keys under prefix.
+            updates: Dict of fields to merge into matching records.
+
+        Returns:
+            Number of records updated.
+
+        Raises:
+            ValueError: If updates is None or empty.
+            TypeError:  If a value under prefix is not a dict.
+
+        Example:
+            db.update_where("user:",
+                where=lambda v: v['city'] == 'NYC',
+                updates={'active': True})
+        """
+        if not updates:
+            raise ValueError("updates must be a non-empty dict")
+
+        now = time.time()
+
+        def _apply(data):
+            count = 0
+            for k, entry in data.items():
+                if not k.startswith(prefix):
+                    continue
+                if entry.get("exp") is not None and now > entry["exp"]:
+                    continue
+                v = entry["v"]
+                if not isinstance(v, dict):
+                    raise TypeError(
+                        f"update_where() requires dict values - key '{k}' has type "
+                        f"{type(v).__name__}."
+                    )
+                if where is None or where(v):
+                    entry["v"] = {**v, **updates}
+                    count += 1
+            return count
+
+        if self._in_transaction:
+            return _apply(self.data)
+        with self._lock():
+            self._reload()
+            count = _apply(self.data)
+            if count:
+                self._save()
+        return count
+
+    def delete_where(self, prefix="", where=None):
+        """
+        Bulk delete all keys under prefix matching a predicate.
+
+        Args:
+            prefix: Key prefix to filter on.
+            where:  Callable predicate applied to each value dict.
+                    None deletes all keys under prefix.
+
+        Returns:
+            Number of records deleted.
+
+        Raises:
+            TypeError: If a value under prefix is not a dict.
+
+        Example:
+            db.delete_where("session:", where=lambda v: v['expired'] == True)
+        """
+        now = time.time()
+
+        def _collect(data):
+            to_delete = []
+            for k, entry in data.items():
+                if not k.startswith(prefix):
+                    continue
+                if entry.get("exp") is not None and now > entry["exp"]:
+                    continue
+                v = entry["v"]
+                if not isinstance(v, dict):
+                    raise TypeError(
+                        f"delete_where() requires dict values - key '{k}' has type "
+                        f"{type(v).__name__}."
+                    )
+                if where is None or where(v):
+                    to_delete.append(k)
+            return to_delete
+
+        if self._in_transaction:
+            to_delete = _collect(self.data)
+            for k in to_delete:
+                self.data.pop(k)
+            return len(to_delete)
+        with self._lock():
+            self._reload()
+            to_delete = _collect(self.data)
+            for k in to_delete:
+                self.data.pop(k)
+            if to_delete:
+                self._save()
+        return len(to_delete)
 
     def count(self):
         return len(self.keys())

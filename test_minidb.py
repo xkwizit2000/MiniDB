@@ -466,7 +466,7 @@ class TestWriteBuffering(unittest.TestCase):
         """With buffering on, put() should NOT write to disk immediately."""
         db = _db(self.tmp, flush_interval=60, flush_ops=100)
         db.put("k", "v")
-        # File should not exist yet — nothing flushed
+        # File should not exist yet - nothing flushed
         self.assertFalse(os.path.exists(db.path))
         db.close()
 
@@ -485,7 +485,7 @@ class TestWriteBuffering(unittest.TestCase):
         db.put("a", 1)
         db.put("b", 2)
         self.assertFalse(os.path.exists(db.path))  # not yet
-        db.put("c", 3)  # 3rd op — triggers flush
+        db.put("c", 3)  # 3rd op - triggers flush
         self.assertTrue(os.path.exists(db.path))
         db2 = _db(self.tmp)
         self.assertEqual(db2.get("a"), 1)
@@ -527,7 +527,7 @@ class TestWriteBuffering(unittest.TestCase):
     def test_manual_flush_noop_when_clean(self):
         """flush() on a non-dirty buffer does not error."""
         db = _db(self.tmp, flush_interval=60)
-        db.flush()  # nothing dirty — should not raise
+        db.flush()  # nothing dirty - should not raise
         db.close()
 
     def test_buffering_compatible_with_transactions(self):
@@ -536,11 +536,244 @@ class TestWriteBuffering(unittest.TestCase):
         with db.transaction():
             db.put("a", 1)
             db.put("b", 2)
-        # Transaction commit calls _flush directly — bypasses buffer
+        # Transaction commit calls _flush directly - bypasses buffer
         db2 = _db(self.tmp)
         self.assertEqual(db2.get("a"), 1)
         self.assertEqual(db2.get("b"), 2)
         db.close()
+
+
+class TestQuery(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = _db(self.tmp)
+        self.db.put_many({
+            "user:1": {"name": "Alice", "age": 30, "city": "NYC"},
+            "user:2": {"name": "Bob",   "age": 25, "city": "SF"},
+            "user:3": {"name": "Charlie","age": 35, "city": "NYC"},
+            "user:4": {"name": "Diana", "age": 28, "city": "LA"},
+            "user:5": {"name": "Eve",   "age": 32, "city": "SF"},
+        })
+
+    def tearDown(self):
+        for f in os.listdir(self.tmp):
+            os.remove(os.path.join(self.tmp, f))
+
+    def test_query_all(self):
+        results = self.db.query("user:")
+        self.assertEqual(len(results), 5)
+
+    def test_query_where(self):
+        results = self.db.query("user:", where=lambda v: v['city'] == 'NYC')
+        self.assertEqual(len(results), 2)
+        names = {r['name'] for r in results}
+        self.assertEqual(names, {"Alice", "Charlie"})
+
+    def test_query_order_by_asc(self):
+        results = self.db.query("user:", order_by='age')
+        ages = [r['age'] for r in results]
+        self.assertEqual(ages, sorted(ages))
+
+    def test_query_order_by_desc(self):
+        results = self.db.query("user:", order_by='-age')
+        ages = [r['age'] for r in results]
+        self.assertEqual(ages, sorted(ages, reverse=True))
+
+    def test_query_limit(self):
+        results = self.db.query("user:", order_by='-age', limit=3)
+        self.assertEqual(len(results), 3)
+        self.assertEqual(results[0]['name'], 'Charlie')  # age 35
+
+    def test_query_columns(self):
+        results = self.db.query("user:", columns=['name', 'age'])
+        for r in results:
+            self.assertIn('_key', r)
+            self.assertIn('name', r)
+            self.assertIn('age', r)
+            self.assertNotIn('city', r)
+
+    def test_query_combined(self):
+        results = self.db.query("user:",
+            where=lambda v: v['age'] >= 30,
+            columns=['name', 'age'],
+            order_by='-age',
+            limit=2)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]['name'], 'Charlie')
+        self.assertEqual(results[1]['name'], 'Eve')
+
+    def test_query_key_in_result(self):
+        results = self.db.query("user:", where=lambda v: v['name'] == 'Alice')
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['_key'], 'user:1')
+
+    def test_query_no_match(self):
+        results = self.db.query("user:", where=lambda v: v['city'] == 'Tokyo')
+        self.assertEqual(results, [])
+
+    def test_query_excludes_expired(self):
+        self.db.put("user:6", {"name": "Frank", "age": 40, "city": "NYC"}, ttl=0.1)
+        time.sleep(0.2)
+        results = self.db.query("user:", where=lambda v: v['name'] == 'Frank')
+        self.assertEqual(results, [])
+
+    def test_query_non_dict_raises(self):
+        self.db.put("user:bad", "not a dict")
+        with self.assertRaises(TypeError):
+            self.db.query("user:")
+
+    def test_query_non_dict_skip_invalid(self):
+        self.db.put("user:bad", "not a dict")
+        results = self.db.query("user:", skip_invalid=True)
+        keys = [r['_key'] for r in results]
+        self.assertNotIn('user:bad', keys)
+        self.assertEqual(len(results), 5)
+
+    def test_query_in_transaction(self):
+        with self.db.transaction():
+            self.db.put("user:6", {"name": "Frank", "age": 22, "city": "NYC"})
+            results = self.db.query("user:", where=lambda v: v['age'] < 25)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['name'], 'Frank')
+
+    def test_query_empty_prefix(self):
+        self.db.put("config:theme", {"value": "dark"})
+        results = self.db.query("")
+        self.assertGreater(len(results), 5)
+
+    def test_query_wrong_prefix(self):
+        results = self.db.query("order:")
+        self.assertEqual(results, [])
+
+
+class TestUpdateWhere(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = _db(self.tmp)
+        self.db.put_many({
+            "user:1": {"name": "Alice", "age": 30, "city": "NYC", "active": True},
+            "user:2": {"name": "Bob",   "age": 25, "city": "SF",  "active": True},
+            "user:3": {"name": "Charlie","age": 35, "city": "NYC", "active": True},
+        })
+
+    def tearDown(self):
+        for f in os.listdir(self.tmp):
+            os.remove(os.path.join(self.tmp, f))
+
+    def test_update_where_matching(self):
+        count = self.db.update_where("user:",
+            where=lambda v: v['city'] == 'NYC',
+            updates={'active': False})
+        self.assertEqual(count, 2)
+        results = self.db.query("user:", where=lambda v: v['active'] == False)
+        self.assertEqual(len(results), 2)
+
+    def test_update_where_all(self):
+        count = self.db.update_where("user:", updates={'verified': True})
+        self.assertEqual(count, 3)
+        results = self.db.query("user:", where=lambda v: v.get('verified'))
+        self.assertEqual(len(results), 3)
+
+    def test_update_where_no_match(self):
+        count = self.db.update_where("user:",
+            where=lambda v: v['city'] == 'Tokyo',
+            updates={'active': False})
+        self.assertEqual(count, 0)
+
+    def test_update_where_persists(self):
+        self.db.update_where("user:",
+            where=lambda v: v['name'] == 'Bob',
+            updates={'age': 26})
+        db2 = _db(self.tmp)
+        result = db2.query("user:", where=lambda v: v['name'] == 'Bob')
+        self.assertEqual(result[0]['age'], 26)
+
+    def test_update_where_empty_updates_raises(self):
+        with self.assertRaises(ValueError):
+            self.db.update_where("user:", updates={})
+
+    def test_update_where_non_dict_raises(self):
+        self.db.put("user:bad", "not a dict")
+        with self.assertRaises(TypeError):
+            self.db.update_where("user:", updates={'active': False})
+
+    def test_update_where_in_transaction(self):
+        with self.db.transaction():
+            self.db.update_where("user:",
+                where=lambda v: v['city'] == 'NYC',
+                updates={'active': False})
+        results = self.db.query("user:", where=lambda v: v['active'] == False)
+        self.assertEqual(len(results), 2)
+
+    def test_update_where_rollback(self):
+        try:
+            with self.db.transaction():
+                self.db.update_where("user:", updates={'active': False})
+                raise ValueError("abort")
+        except ValueError:
+            pass
+        results = self.db.query("user:", where=lambda v: v['active'] == True)
+        self.assertEqual(len(results), 3)
+
+
+class TestDeleteWhere(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = _db(self.tmp)
+        self.db.put_many({
+            "user:1": {"name": "Alice", "age": 30, "city": "NYC"},
+            "user:2": {"name": "Bob",   "age": 25, "city": "SF"},
+            "user:3": {"name": "Charlie","age": 35, "city": "NYC"},
+        })
+
+    def tearDown(self):
+        for f in os.listdir(self.tmp):
+            os.remove(os.path.join(self.tmp, f))
+
+    def test_delete_where_matching(self):
+        count = self.db.delete_where("user:",
+            where=lambda v: v['city'] == 'NYC')
+        self.assertEqual(count, 2)
+        self.assertEqual(self.db.count(), 1)
+
+    def test_delete_where_all(self):
+        count = self.db.delete_where("user:")
+        self.assertEqual(count, 3)
+        self.assertEqual(self.db.count(), 0)
+
+    def test_delete_where_no_match(self):
+        count = self.db.delete_where("user:",
+            where=lambda v: v['city'] == 'Tokyo')
+        self.assertEqual(count, 0)
+        self.assertEqual(self.db.count(), 3)
+
+    def test_delete_where_persists(self):
+        self.db.delete_where("user:", where=lambda v: v['name'] == 'Bob')
+        db2 = _db(self.tmp)
+        result = db2.query("user:", where=lambda v: v['name'] == 'Bob')
+        self.assertEqual(result, [])
+
+    def test_delete_where_non_dict_raises(self):
+        self.db.put("user:bad", "not a dict")
+        with self.assertRaises(TypeError):
+            self.db.delete_where("user:")
+
+    def test_delete_where_in_transaction(self):
+        with self.db.transaction():
+            self.db.delete_where("user:", where=lambda v: v['city'] == 'NYC')
+        self.assertEqual(self.db.count(), 1)
+
+    def test_delete_where_rollback(self):
+        try:
+            with self.db.transaction():
+                self.db.delete_where("user:")
+                raise ValueError("abort")
+        except ValueError:
+            pass
+        self.assertEqual(self.db.count(), 3)
 
 
 if __name__ == "__main__":

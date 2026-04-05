@@ -28,3 +28,8 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+#junk
+
+ISSUES.md
+promote.sh

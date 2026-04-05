@@ -1,6 +1,6 @@
 # MiniDB
 
-![Version](https://img.shields.io/badge/version-0.4.0-blue)
+![Version](https://img.shields.io/badge/version-0.5.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 A lightweight, zero-dependency key-value store backed by JSON. Single file, production-grade primitives.
@@ -59,8 +59,46 @@ db.scan("user:")        # {"user:1": "alice", "user:2": "bob"}
 db.keys()               # all non-expired keys
 db.count()              # number of non-expired keys
 db.compact()            # purge expired keys, rewrite file, return remaining count
+```
 
-# Write buffering - batch disk writes for high-throughput workloads
+# SQL-like queries - filter, sort, project, limit
+db.put_many({
+    "user:1": {"name": "Alice", "age": 30, "city": "NYC"},
+    "user:2": {"name": "Bob",   "age": 25, "city": "SF"},
+    "user:3": {"name": "Charlie","age": 35, "city": "NYC"},
+})
+
+# All users
+db.query("user:")
+
+# Where clause
+db.query("user:", where=lambda v: v['city'] == 'NYC')
+
+# Column projection - _key always included
+db.query("user:", columns=['name', 'age'])
+
+# Order by field; prefix '-' for descending
+db.query("user:", order_by='-age')
+
+# Full SQL-style query
+db.query("user:",
+    where=lambda v: v['age'] >= 30,
+    columns=['name', 'age'],
+    order_by='-age',
+    limit=5)
+
+# Bulk update matching records
+db.update_where("user:",
+    where=lambda v: v['city'] == 'NYC',
+    updates={'active': True})
+
+# Bulk delete matching records
+db.delete_where("user:", where=lambda v: v['active'] == False)
+
+# Non-dict values raise TypeError by default; skip with flag
+db.query("user:", skip_invalid=True)
+
+
 db = MiniDB("mydb.json", flush_interval=5)     # flush every 5 seconds
 db = MiniDB("mydb.json", flush_ops=100)         # flush every 100 mutations
 db = MiniDB("mydb.json", flush_interval=5, flush_ops=100)  # whichever comes first
@@ -91,13 +129,13 @@ with db.transaction():
     db.delete("stale_key")
     db.scan("user:")
 
-```
+
 
 ```bash
 python -m unittest test_minidb -v
 ```
 
-58 tests across basic ops, persistence, TTL, batch ops, prefix scan, concurrency, transactions, and write buffering.
+88 tests across basic ops, persistence, TTL, batch ops, prefix scan, concurrency, transactions, write buffering, and SQL-like queries.
 
 ## License
 
