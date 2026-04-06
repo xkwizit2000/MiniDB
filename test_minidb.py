@@ -5,7 +5,7 @@
 # See LICENSE file for full license text.
 
 import unittest, threading, os, time, tempfile
-from minidb import MiniDB
+from minidb import MiniDB, Q
 
 
 def _db(tmp_dir, name="test.json", **kwargs):
@@ -776,6 +776,167 @@ class TestDeleteWhere(unittest.TestCase):
         self.assertEqual(self.db.count(), 3)
 
 
+class TestQ(unittest.TestCase):
+    """Tests for the Q query predicate builder."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = _db(self.tmp)
+        self.db.put_many({
+            "user:1": {"name": "Alice",   "age": 30, "city": "NYC", "score": 95.5},
+            "user:2": {"name": "Bob",     "age": 25, "city": "SF",  "score": 80.0},
+            "user:3": {"name": "Charlie", "age": 35, "city": "NYC", "score": 70.0},
+            "user:4": {"name": "Diana",   "age": 28, "city": "LA",  "score": 88.5},
+            "user:5": {"name": "Eve",     "age": 32, "city": "SF",  "score": 92.0, "nickname": None},
+            "user:6": {"name": "Frank",   "age": 40, "city": "NYC", "score": 60.0, "nickname": "Franky"},
+        })
+
+    def tearDown(self):
+        for f in os.listdir(self.tmp):
+            os.remove(os.path.join(self.tmp, f))
+
+    # --- Comparison operators ---
+
+    def test_eq_implicit(self):
+        results = self.db.query("user:", where=Q(city="NYC"))
+        self.assertEqual(len(results), 3)
+
+    def test_eq_explicit(self):
+        results = self.db.query("user:", where=Q(city__eq="NYC"))
+        self.assertEqual(len(results), 3)
+
+    def test_ne(self):
+        results = self.db.query("user:", where=Q(city__ne="NYC"))
+        self.assertEqual(len(results), 3)
+
+    def test_gt(self):
+        results = self.db.query("user:", where=Q(age__gt=30))
+        names = {r['name'] for r in results}
+        self.assertEqual(names, {"Charlie", "Eve", "Frank"})
+
+    def test_gte(self):
+        results = self.db.query("user:", where=Q(age__gte=30))
+        names = {r['name'] for r in results}
+        self.assertEqual(names, {"Alice", "Charlie", "Eve", "Frank"})
+
+    def test_lt(self):
+        results = self.db.query("user:", where=Q(age__lt=30))
+        names = {r['name'] for r in results}
+        self.assertEqual(names, {"Bob", "Diana"})
+
+    def test_lte(self):
+        results = self.db.query("user:", where=Q(age__lte=30))
+        names = {r['name'] for r in results}
+        self.assertEqual(names, {"Alice", "Bob", "Diana"})
+
+    # --- Membership operators ---
+
+    def test_in(self):
+        results = self.db.query("user:", where=Q(city__in=["NYC", "SF"]))
+        self.assertEqual(len(results), 5)
+
+    def test_nin(self):
+        results = self.db.query("user:", where=Q(city__nin=["NYC", "SF"]))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['name'], "Diana")
+
+    # --- String operators ---
+
+    def test_contains(self):
+        results = self.db.query("user:", where=Q(name__contains="li"))
+        names = {r['name'] for r in results}
+        self.assertEqual(names, {"Alice", "Charlie"})
+
+    def test_startswith(self):
+        results = self.db.query("user:", where=Q(name__startswith="A"))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['name'], "Alice")
+
+    def test_endswith(self):
+        results = self.db.query("user:", where=Q(name__endswith="e"))
+        names = {r['name'] for r in results}
+        self.assertEqual(names, {"Alice", "Charlie", "Eve"})
+
+    # --- Existence operators ---
+
+    def test_exists_true(self):
+        results = self.db.query("user:", where=Q(nickname__exists=True))
+        names = {r['name'] for r in results}
+        self.assertEqual(names, {"Eve", "Frank"})
+
+    def test_exists_false(self):
+        results = self.db.query("user:", where=Q(nickname__exists=False))
+        self.assertEqual(len(results), 4)
+
+    def test_isnull_true(self):
+        results = self.db.query("user:", where=Q(nickname__isnull=True))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['name'], "Eve")
+
+    def test_isnull_false(self):
+        results = self.db.query("user:", where=Q(nickname__isnull=False))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['name'], "Frank")
+
+    # --- Combinators ---
+
+    def test_and(self):
+        results = self.db.query("user:", where=Q(city="NYC") & Q(age__gt=30))
+        names = {r['name'] for r in results}
+        self.assertEqual(names, {"Charlie", "Frank"})
+
+    def test_or(self):
+        results = self.db.query("user:", where=Q(city="LA") | Q(age__gt=38))
+        names = {r['name'] for r in results}
+        self.assertEqual(names, {"Diana", "Frank"})
+
+    def test_not(self):
+        results = self.db.query("user:", where=~Q(city="NYC"))
+        self.assertEqual(len(results), 3)
+
+    def test_complex_combined(self):
+        results = self.db.query("user:",
+            where=(Q(city="NYC") | Q(city="SF")) & Q(age__gte=30))
+        names = {r['name'] for r in results}
+        self.assertEqual(names, {"Alice", "Charlie", "Eve", "Frank"})
+
+    def test_chained_and(self):
+        results = self.db.query("user:",
+            where=Q(city="NYC") & Q(age__gte=30) & Q(score__gt=90))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['name'], "Alice")
+
+    # --- Integration with update_where and delete_where ---
+
+    def test_q_with_update_where(self):
+        count = self.db.update_where("user:",
+            where=Q(city="NYC") & Q(age__gt=30),
+            updates={'flagged': True})
+        self.assertEqual(count, 2)
+        results = self.db.query("user:", where=Q(flagged=True))
+        names = {r['name'] for r in results}
+        self.assertEqual(names, {"Charlie", "Frank"})
+
+    def test_q_with_delete_where(self):
+        count = self.db.delete_where("user:", where=Q(score__lt=75))
+        self.assertEqual(count, 2)
+        remaining = self.db.query("user:")
+        names = {r['name'] for r in remaining}
+        self.assertNotIn("Charlie", names)
+        self.assertNotIn("Frank", names)
+
+    # --- Error handling ---
+
+    def test_unknown_operator_raises(self):
+        with self.assertRaises(ValueError):
+            self.db.query("user:", where=Q(age__between=25))
+
+    def test_repr_simple(self):
+        self.assertEqual(repr(Q(city="NYC")), "Q(city='NYC')")
+
+    def test_repr_combined(self):
+        self.assertIn("combined", repr(Q(city="NYC") & Q(age__gt=25)))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-
