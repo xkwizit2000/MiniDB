@@ -29,7 +29,7 @@
 import json, os, time, tempfile, threading, atexit
 from contextlib import contextmanager
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 _MISSING = object()  # sentinel to distinguish missing keys from stored None
 
@@ -46,6 +46,122 @@ except ImportError:
 
 class LockError(Exception):
     pass
+
+
+class Q:
+    """
+    Query predicate builder for use with MiniDB.query(), update_where(),
+    and delete_where(). Supports field lookups, logical combinators, and
+    composition via &, |, and ~.
+
+    Basic usage:
+        Q(city="NYC")                    # equality
+        Q(age__gt=29)                    # greater than
+        Q(city__in=["NYC", "SF"])        # membership
+        Q(name__startswith="A")          # string prefix
+        Q(nickname__exists=True)         # field presence
+        Q(nickname__isnull=True)         # field is None
+
+    Combining:
+        Q(city="NYC") & Q(age__gt=29)   # AND
+        Q(city="NYC") | Q(city="SF")    # OR
+        ~Q(city="LA")                    # NOT
+
+    Supported operators (via double-underscore suffix):
+        Comparison : eq, gt, gte, lt, lte, ne
+        Membership : in, nin
+        String     : contains, startswith, endswith
+        Existence  : exists, isnull
+    """
+
+    _OPS = {
+        "eq":         lambda a, b: a == b,
+        "gt":         lambda a, b: a >  b,
+        "gte":        lambda a, b: a >= b,
+        "lt":         lambda a, b: a <  b,
+        "lte":        lambda a, b: a <= b,
+        "ne":         lambda a, b: a != b,
+        "in":         lambda a, b: a in b,
+        "nin":        lambda a, b: a not in b,
+        "contains":   lambda a, b: b in a,
+        "startswith": lambda a, b: a.startswith(b),
+        "endswith":   lambda a, b: a.endswith(b),
+    }
+
+    def __init__(self, **kwargs):
+        self._conditions = kwargs  # raw field__op=value pairs
+        self._fn = None            # set by combinators (&, |, ~)
+
+    def __call__(self, v):
+        # Combinator path - delegate to composed function
+        if self._fn is not None:
+            return self._fn(v)
+
+        # Condition path - evaluate each field__op=value pair
+        for key, val in self._conditions.items():
+            if "__" in key:
+                field, op = key.rsplit("__", 1)
+            else:
+                field, op = key, "eq"
+
+            # exists and isnull don't need the actual value
+            if op == "exists":
+                result = field in v
+                if not (result == val):
+                    return False
+                continue
+
+            if op == "isnull":
+                field_exists = field in v
+                field_is_none = field_exists and v[field] is None
+                if val:
+                    # isnull=True - field must exist and be None
+                    if not field_is_none:
+                        return False
+                else:
+                    # isnull=False - field must exist and not be None
+                    if not (field_exists and not field_is_none):
+                        return False
+                continue
+
+            if op not in self._OPS:
+                raise ValueError(
+                    f"Q: unknown operator '{op}'. "
+                    f"Supported: {', '.join(sorted(self._OPS))}."
+                )
+
+            actual = v.get(field)
+            try:
+                if not self._OPS[op](actual, val):
+                    return False
+            except TypeError as e:
+                raise TypeError(
+                    f"Q: cannot apply '{op}' to field '{field}' "
+                    f"(got {type(actual).__name__}): {e}"
+                )
+
+        return True
+
+    def __and__(self, other):
+        q = Q()
+        q._fn = lambda v: self(v) and other(v)
+        return q
+
+    def __or__(self, other):
+        q = Q()
+        q._fn = lambda v: self(v) or other(v)
+        return q
+
+    def __invert__(self):
+        q = Q()
+        q._fn = lambda v: not self(v)
+        return q
+
+    def __repr__(self):
+        if self._fn is not None:
+            return f"Q(<combined>)"
+        parts = ", ".join(f"{k}={v!r}" for k, v in self._conditions.items())
+        return f"Q({parts})"
 
 
 class MiniDB:
@@ -607,7 +723,6 @@ class MiniDB:
                 self.data.pop(k)
             self._save()
         return len(self.data)
-
 
 
 
