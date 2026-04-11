@@ -1,8 +1,7 @@
 # minidb.py
 #
 # Based on https://github.com/rogue-agent1/minidb by rogue-agent1
-# Modifications: atomic writes, TTL support, file locking, batch ops,
-#                stored None fix, get() default parameter
+# Substantially extended — see CHANGELOG.md for full history
 #
 # MIT License
 #
